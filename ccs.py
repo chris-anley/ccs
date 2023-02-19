@@ -7,6 +7,7 @@ import os
 
 # Code Credential Scanner
 
+
 SKIP_EXTS = [
     regex.compile(r'\.DS_Store$'),
     regex.compile(r'\.css$'),
