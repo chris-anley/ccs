@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2022 Chris Anley All Rights Reserved
+import argparse
 import os
 import re
 import signal
@@ -242,11 +243,11 @@ non_password_regexes_strict = [
 ]
 
 
-def get_passwords_from_line(fname, line):
+def get_passwords_from_line(fname, line, args):
     results = []
 
     for pwd_regex, rule_id, result_type, files_include in pwd_rules:
-        if not douser:
+        if not args.douser:
             if result_type == 'USER':
                 continue
         if files_include:
@@ -271,17 +272,17 @@ def get_passwords_from_line(fname, line):
     return results
 
 
-def is_not_a_password(pwd):
+def is_not_a_password(pwd, args):
     # pwd is interpolation string, web rgb code, unicode char etc
     for npregex in non_password_regexes:
         if npregex.search(pwd.lower()):
-            if vvv:
+            if args.vvv:
                 eprint('Not a password: \'' + pwd + '\' because it matches regex \'' + str(npregex) + '\'')
             return True
-    if not placeholder:
+    if not args.placeholder:
         for npregex in non_password_regexes_strict:
             if npregex.search(pwd.lower()):
-                if vvv:
+                if args.vvv:
                     eprint('(Placeholder) Not a password: \'' + pwd + '\' because it matches regex \'' + str(npregex) + '\'')
                 return True
     return False
@@ -329,17 +330,17 @@ def is_line_suppression_comment(text):
     return False
 
 
-def check_line_password(fname, text):
+def check_line_password(fname, text, args):
     try:
         # check if this line contains a password, return text if yes, plus score?
         outputs = []
 
         # if line has an 'ignore' comment, or is ridiculously long, ignore this line
-        if not nosuppress:
+        if not args.no_suppress:
             if is_line_suppression_comment(text): return outputs  # noqa
         if len(text) > 8192: return outputs  # noqa
 
-        results = get_passwords_from_line(fname, text)
+        results = get_passwords_from_line(fname, text, args)
 
         for rule_id, prefix, pwd, suffix, result_type in results:
             # check conditions under which we stop scoring the candidate password
@@ -349,10 +350,10 @@ def check_line_password(fname, text):
             if 'publickeytoken' in prefix.lower(): continue  # noqa
             # if 'example' in prefix.lower() or 'example' in suffix.lower(): continue  # noqa
             # if has_non_ascii(pwd): continue  # noqa
-            if is_not_a_password(pwd) and pwd not in SHORT_BAD_PASSWORDS:
+            if is_not_a_password(pwd, args) and pwd not in SHORT_BAD_PASSWORDS:
                 continue  # noqa # ignore known non-password patterns
             outputs = outputs + [(rule_id, prefix + ':' + pwd + ':' + suffix, result_type)]
-            if not allow_duplicates:
+            if not args.dupes:
                 break
         return outputs
 
@@ -361,14 +362,16 @@ def check_line_password(fname, text):
         eprint("")
 
 
-def skip_file(fname):
-    global ns
-    if ns:
+def skip_file(fname, custom_patterns, args):
+    if args.no_skip:
         return False
     for skip in SKIP_DIRS:
         if skip.search(fname):
             return True
     for skip in SKIP_EXTS:
+        if skip.search(fname):
+            return True
+    for skip in custom_patterns:
         if skip.search(fname):
             return True
     return False
@@ -386,9 +389,9 @@ def write_result(result_msg):
     print(result_msg)
 
 
-def do_line_cred_check(fname, line, line_num):
+def do_line_cred_check(fname, line, line_num, args):
     try:
-        results = check_line_password(fname, line)
+        results = check_line_password(fname, line, args)
         for rule_id, result, type in results:  # noqa
             msg = f"{fname}:{line_num}:{type}:Rule:{str(rule_id)}:{result}"
             write_result(msg)  # noqa
@@ -398,8 +401,8 @@ def do_line_cred_check(fname, line, line_num):
         eprint("")
 
 
-def do_checks():
-    if a:
+def do_checks(args, custom_patterns):
+    if args.all_files:
         mode = 'rb'
     else:
         mode = 'r'
@@ -408,19 +411,19 @@ def do_checks():
         for fn in files:
             fname = str(root) + "/" + str(fn)
             # exclude some files/paths based on verbosity options
-            if skip_file(fname):
+            if skip_file(fname, custom_patterns, args):
                 continue
-            if print_progress:
+            if args.progress:
                 eprint('Scanning ' + fname)
 
             try:
                 with open(fname, mode) as f:
                     line_num = 1
                     for line in f:
-                        if a: line = str(line)  # noqa
-                        if not nosuppress:
+                        if args.all_files: line = str(line)  # noqa
+                        if not args.no_suppress:
                             if is_file_suppression_comment(line): break  # noqa
-                        do_line_cred_check(fname, line, line_num)
+                        do_line_cred_check(fname, line, line_num, args)
                         line_num += 1
             except:  # noqa
                 continue
@@ -437,25 +440,61 @@ def syntax():
 
         Run from code root directory. Output is to stdout, errors and 'verbose' messages are to stderr.
 
-        The default is to return fewer false-positives; use '-everything' for lots of false positives
+        The default is to return fewer false-positives; use '--everything' for lots of false positives
 
         "Result Type" is USER (for a username/email/account id), or PASSWORD (for a password, auth token, cryptographic key)
         Password hashes and encrypted passwords are generally crackable, and are reported as 'PASSWORD'
 
         ccs.py [options]
-        -a   : check all files, including binaries (i.e. files containing invalid utf-8 chars)
-        -dupes : report all hits for a single line (default is to only report the first hit)
-        -nosuppress : ignore suppression comments such as # noqa, at line and file level 
-        -douser : Run USERNAME checks as well as PASSWORD / KEY checks
-        -everything : Get all possible creds; equivalent to -nosuppress -douser -ns -sa -placeholder
-        -ns  : no skip : don't skip files/directories that are irrelevant, like test, /vendor/, /node_modules/, .zip etc
-        -p   : print progress
-        -sa  : scan all files, not just recommended / code files
-        -placeholder : Allow some likely 'placeholder' false positives, like 'password', 'example', 'dummy'
-        -v   : quite verbose
-        -vv  : annoyingly verbose
-        -vvv : pointlessly verbose
+        -a, --all-files : check all files, including binaries (i.e. files containing invalid utf-8 chars)
+        --dupes : report all hits for a single line (default is to only report the first hit)
+        --no-suppress : ignore suppression comments such as # noqa, at line and file level 
+        --douser : Run USERNAME checks as well as PASSWORD / KEY checks
+        --everything : Get all possible creds; equivalent to --no-suppress --douser --no-skip --scan-all --placeholder
+        --no-skip : don't skip files/directories that are irrelevant, like test, /vendor/, /node_modules/, .zip etc
+        -p, --progress : print progress
+        --scan-all : scan all files, not just recommended / code files
+        -x PATTERN, --exclude PATTERN : skip additional files/folders matching the regex pattern (can be used multiple times)
+        --placeholder : Allow some likely 'placeholder' false positives, like 'password', 'example', 'dummy'
+        -v, --verbose : increase verbosity (-v, -vv, -vvv)
         ''')
+
+
+def create_parser():
+    parser = argparse.ArgumentParser(
+        description='Code Credential Scanner - Scan for credentials in code',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''\"Result Type\" is USER (for a username/email/account id), or PASSWORD (for a password, auth token, cryptographic key)
+Password hashes and encrypted passwords are generally crackable, and are reported as 'PASSWORD'
+
+Run from code root directory. Output is to stdout, errors and 'verbose' messages are to stderr.
+The default is to return fewer false-positives; use '--everything' for lots of false positives'''
+    )
+    
+    parser.add_argument('-a', '--all-files', action='store_true', 
+                        help='check all files, including binaries (i.e. files containing invalid utf-8 chars)')
+    parser.add_argument('--dupes', action='store_true', 
+                        help='report all hits for a single line (default is to only report the first hit)')
+    parser.add_argument('--no-suppress', action='store_true', 
+                        help='ignore suppression comments such as # noqa, at line and file level')
+    parser.add_argument('--douser', action='store_true', 
+                        help='Run USERNAME checks as well as PASSWORD / KEY checks')
+    parser.add_argument('--everything', action='store_true', 
+                        help='Get all possible creds; equivalent to --no-suppress --douser --no-skip --scan-all --placeholder')
+    parser.add_argument('--no-skip', action='store_true', 
+                        help="don't skip files/directories that are irrelevant, like test, /vendor/, /node_modules/, .zip etc")
+    parser.add_argument('-p', '--progress', action='store_true', 
+                        help='print progress')
+    parser.add_argument('--scan-all', action='store_true', 
+                        help='scan all files, not just recommended / code files')
+    parser.add_argument('-x', '--exclude', action='append', dest='exclude_patterns', 
+                        help='skip additional files/folders matching the regex pattern (can be used multiple times)')
+    parser.add_argument('--placeholder', action='store_true', 
+                        help="Allow some likely 'placeholder' false positives, like 'password', 'example', 'dummy'")
+    parser.add_argument('-v', '--verbose', action='count', default=0, 
+                        help='increase verbosity (-v, -vv, -vvv)')
+    
+    return parser
 
 
 a = False
@@ -470,58 +509,40 @@ nosuppress = False
 allow_duplicates = False
 placeholder = False
 douser = False
+custom_skip_patterns = []
 
 
-def do_main():
-    global a, v, vv, vvv, ns, sa, sc, print_progress, nosuppress, allow_duplicates, placeholder, douser
-    argc = len(sys.argv)
-    argv = sys.argv
-
-    for i in range(1, argc):
-        if argv[i] in ['-h', '-?', '--help', '--h', '/?']:
-            return syntax()
-
-        if argv[i] == '-a':
-            a = True
-            ns = True  # no skip directories
-            sa = True  # apply all checks to all files
-            continue
-        if argv[i] == '-v':
-            v = True
-            continue
-        if argv[i] == '-vv':
-            v = True
-            vv = True
-            continue
-        if argv[i] == '-vvv':
-            v = True
-            vv = True
-            vvv = True
-            print_progress = True
-            continue
-        if argv[i] == '-ns':  # no skip directories / files
-            ns = True
-            continue
-        if argv[i] == '-sa':  # apply all checks to all files
-            sa = True
-            continue
-        if argv[i] == '-p':
-            print_progress = True
-        if argv[i] == '-nosuppress':
-            nosuppress = True
-        if argv[i] == '-dupes':
-            allow_duplicates = True
-        if argv[i] == '-placeholder':
-            placeholder = True
-        if argv[i] == '-douser':
-            douser = True
-        if argv[i] == '-everything':
-            douser = True
-            nosuppress = True
-            ns = True
-            sa = True
-            placeholder = True
-    return do_checks()
+def do_main(args, custom_patterns):
+    # Handle --everything flag
+    if args.everything:
+        args.no_suppress = True
+        args.douser = True
+        args.no_skip = True
+        args.scan_all = True
+        args.placeholder = True
+    
+    # Handle --all-files flag which implies no-skip and scan-all
+    if args.all_files:
+        args.no_skip = True
+        args.scan_all = True
+    
+    # Handle verbosity levels
+    if args.verbose >= 3:
+        args.progress = True
+        args.vvv = True
+        args.vv = True
+        args.v = True
+    elif args.verbose == 2:
+        args.vv = True
+        args.v = True
+    elif args.verbose == 1:
+        args.v = True
+    else:
+        args.vvv = False
+        args.vv = False
+        args.v = False
+    
+    return do_checks(args, custom_patterns)
 
 
 def signal_handler(sig, frame):  # noqa
@@ -530,5 +551,19 @@ def signal_handler(sig, frame):  # noqa
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
-    if do_main():
+    
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # Compile custom exclude patterns
+    custom_patterns = []
+    if args.exclude_patterns:
+        for pattern in args.exclude_patterns:
+            try:
+                custom_patterns.append(re.compile(pattern))
+            except re.error as e:
+                eprint(f"Invalid regex pattern for -x: {pattern} - {e}")
+    
+    # Run the scan
+    if do_main(args, custom_patterns):
         sys.exit("CCS: Credentials were found\n")
