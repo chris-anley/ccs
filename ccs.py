@@ -371,8 +371,15 @@ def skip_file(fname, custom_patterns, args):
     for skip in SKIP_EXTS:
         if skip.search(fname):
             return True
-    for skip in custom_patterns:
-        if skip.search(fname):
+    for pattern in custom_patterns:
+        # For custom patterns: match exact filenames or directory components
+        # This prevents substring matches in the middle of paths
+        path_parts = fname.split('/')
+        # Check if pattern matches the filename (basename)
+        if pattern == path_parts[-1]:
+            return True
+        # Check if pattern matches as a directory component
+        if '/' + pattern + '/' in fname or fname.startswith(pattern + '/'):
             return True
     return False
 
@@ -454,7 +461,7 @@ def syntax():
         --no-skip : don't skip files/directories that are irrelevant, like test, /vendor/, /node_modules/, .zip etc
         -p, --progress : print progress
         --scan-all : scan all files, not just recommended / code files
-        -x PATTERN, --exclude PATTERN : skip additional files/folders matching the regex pattern (can be used multiple times)
+        -x PATTERN, --exclude PATTERN : skip specific files/directories by exact name (can be used multiple times)
         --placeholder : Allow some likely 'placeholder' false positives, like 'password', 'example', 'dummy'
         -v, --verbose : increase verbosity (-v, -vv, -vvv)
         ''')
@@ -488,7 +495,7 @@ The default is to return fewer false-positives; use '--everything' for lots of f
     parser.add_argument('--scan-all', action='store_true', 
                         help='scan all files, not just recommended / code files')
     parser.add_argument('-x', '--exclude', action='append', dest='exclude_patterns', 
-                        help='skip additional files/folders matching the regex pattern (can be used multiple times)')
+                        help='skip specific files/directories by exact name (can be used multiple times)')
     parser.add_argument('--placeholder', action='store_true', 
                         help="Allow some likely 'placeholder' false positives, like 'password', 'example', 'dummy'")
     parser.add_argument('-v', '--verbose', action='count', default=0, 
@@ -555,14 +562,12 @@ if __name__ == "__main__":
     parser = create_parser()
     args = parser.parse_args()
     
-    # Compile custom exclude patterns
+    # Parse custom exclude patterns as literal paths/filenames
     custom_patterns = []
     if args.exclude_patterns:
         for pattern in args.exclude_patterns:
-            try:
-                custom_patterns.append(re.compile(pattern))
-            except re.error as e:
-                eprint(f"Invalid regex pattern for -x: {pattern} - {e}")
+            # Treat patterns as literal directory/file names, not regex
+            custom_patterns.append(pattern)
     
     # Run the scan
     if do_main(args, custom_patterns):
